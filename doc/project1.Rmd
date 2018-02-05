@@ -1,0 +1,529 @@
+---
+title: "Project 1"
+author: "Peifeng Hong ph2534"
+output: html_document
+---
+
+## What is the difference of inaugural speeches according to approval rate in election?
+
+The election of president in US is a big event for American people. During the voting, the presidents have to try their best to attract the voters and get as much vote as possible.
+
+After the vote, there are several situation: A nominee is outstanding and has most of the vote, which means he collect a higher rate of the total votes. And here an analysis between the rate of earing votes and the winner's inaugural speech is made.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Step 0: check and install needed packages. Load the libraries and functions. 
+
+```{r, message=FALSE, warning=FALSE}
+packages.used=c("rvest", "tibble", "qdap", 
+                "sentimentr", "gplots", "dplyr",
+                "tm", "syuzhet", "factoextra", 
+                "beeswarm", "scales", "RColorBrewer",
+                "RANN", "tm", "topicmodels")
+
+# check packages that need to be installed.
+packages.needed=setdiff(packages.used, 
+                        intersect(installed.packages()[,1], 
+                                  packages.used))
+# install additional packages
+if(length(packages.needed)>0){
+  install.packages(packages.needed, dependencies = TRUE)
+}
+
+# load packages
+library("rvest")
+library("tibble")
+library("qdap")
+library("sentimentr")
+library("gplots")
+library("dplyr")
+library("tm")
+library("syuzhet")
+library("factoextra")
+library("beeswarm")
+library("scales")
+library("RColorBrewer")
+library("RANN")
+library("tm")
+library("topicmodels")
+
+source("../lib/plotstacked.R")
+source("../lib/speechFuncs.R")
+```
+This notebook was prepared with the following environmental settings.
+
+
+# Step 1: Data harvest
+
+Scrap inaugural address URLs from <http://www.presidency.ucsb.edu/>.
+
+Following the example of [Jerid Francom](https://francojc.github.io/2015/03/01/web-scraping-with-rvest-in-r/), we used [Selectorgadget](http://selectorgadget.com/) to choose the links we would like to scrap.
+
+For this project, we selected all inaugural addresses of past presidents for our textual analysis of presidential speeches as well as the election results by Electoral College margin from Wiki(<https://en.wikipedia.org/wiki/List_of_United_States_presidential_elections_by_Electoral_College_margin>).
+
+```{r, message=FALSE, warning=FALSE}
+### Inauguaral speeches
+main.page <- read_html(x = "http://www.presidency.ucsb.edu/inaugurals.php")
+# Get link URLs
+# f.speechlinks is a function for extracting links from the list of speeches. 
+inaug=f.speechlinks(main.page)
+
+inaug=inaug[-nrow(inaug),] # remove the last line, irrelevant due to error.
+
+#list of speech from <http://www.presidency.ucsb.edu/>
+inaug.list=read.csv("../data/inauglist.csv", stringsAsFactors = FALSE)
+
+#list of electoral resulte
+
+result.list = read.csv("../data/election result.csv",stringsAsFactors = FALSE)
+
+percentage <- result.list$Percentage
+margin <- result.list$Normalized.victory.margin
+```
+
+prepare all the data into one dataset
+```{r}
+speech.list=inaug.list
+speech.list$type=rep("inaug", nrow(inaug.list))
+speech.list$percentage <- percentage
+speech.list$margin <- margin
+speech.url=inaug
+speech.list=cbind(speech.list, speech.url)
+```
+
+using [Selectorgadget](http://selectorgadget.com/)  to scrap the full speech.
+
+```{r}
+# Loop over each row in speech.list
+speech.list$fulltext=NA
+for(i in seq(nrow(speech.list))) {
+  text <- read_html(speech.list$urls[i]) %>% # load the page
+    html_nodes(".displaytext") %>% # isloate the text
+    html_text() # get the text
+  speech.list$fulltext[i]=text
+  # Create the file name
+  filename <- paste0("../data/fulltext/", 
+                     speech.list$type[i],
+                     speech.list$File[i], "-", 
+                     speech.list$Term[i], ".txt")
+  sink(file = filename) %>% # open file to write 
+  cat(text)  # write the file
+  sink() # close the file
+}
+```
+
+
+```{r, message=FALSE, warning=FALSE}
+sentence.list=NULL
+for(i in 1:nrow(speech.list)){
+  sentences=sent_detect(speech.list$fulltext[i],
+                        endmarks = c("?", ".", "!", "|",";"))
+  if(length(sentences)>0){
+    emotions=get_nrc_sentiment(sentences)
+    word.count=word_count(sentences)
+    # colnames(emotions)=paste0("emo.", colnames(emotions))
+    # in case the word counts are zeros?
+    emotions=diag(1/(word.count+0.01))%*%as.matrix(emotions)
+    sentence.list=rbind(sentence.list, 
+                        cbind(speech.list[i,-ncol(speech.list)],
+                              sentences=as.character(sentences), 
+                              word.count,
+                              emotions,
+                              sent.id=1:length(sentences)
+                              )
+    )
+  }
+  
+sentence.list=
+  sentence.list%>%
+  filter(!is.na(word.count)) 
+}
+```
+
+We can see high margin and high percentage goes to same president.
+Then we can select a group of presidents who has high approval rate as well as low approval rate.
+```{r}
+orderbypercent <- order(speech.list$percentage)
+orderbymargin <- order(speech.list$margin)
+head(speech.list[orderbypercent,c(1,9)],10)
+tail(speech.list[orderbypercent,c(1,9)],10)
+head(speech.list[orderbymargin,c(1,10)],10)
+tail(speech.list[orderbymargin,c(1,10)],10)
+
+Lpertpresident <- speech.list[orderbypercent[1:15],2]
+Hpertpresident <- speech.list[orderbypercent[39:58],2]
+
+```
+
+
+# Step 2: basic analysis --length of words
+```{r, fig.width = 5, fig.height = 5}
+
+par(mar=c(4, 11, 2, 2))
+
+
+
+funcofLOA <- function(sel.comparison,mainvar){
+  sentence.list.sel=filter(sentence.list,File%in%sel.comparison)
+  sentence.list.sel$File=factor(sentence.list.sel$File)
+  
+  sentence.list.sel$FileOrdered=reorder(sentence.list.sel$File, 
+                                    sentence.list.sel$word.count, 
+                                    mean, 
+                                    order=T)
+  
+  beeswarm(word.count~FileOrdered, 
+           data=sentence.list.sel,
+           horizontal = TRUE, 
+           pch=16, col=alpha(brewer.pal(9, "Set1"), 0.6), 
+           cex=0.55, cex.axis=0.8, cex.lab=0.8,
+           spacing=5/nlevels(sentence.list.sel$FileOrdered),
+           las=2, xlab="Number of words in a sentence.", ylab="",
+           main = mainvar)
+}
+
+funcofLOA(Lpertpresident,"president won with low percentage")
+funcofLOA(Hpertpresident,"president won with high percentage")
+```
+
+Comparing the high approval presidents and low approval presidents, both of them spokes a lot sentence with few words. Yet the presidents with higer approval rate is significantly using more short sentences than those with lower approval rate.
+
+# Step 2: sentence visualization
+
+```{r, fig.height=5, fig.width=5}
+par(mfrow=c(3,1), mar=c(1,0,2,0), bty="n", xaxt="n", yaxt="n", font.main=1)
+
+f.plotsent.len(In.list=sentence.list, InFile="JohnQuincyAdams", 
+               InType="inaug",InTerm=1,President = "John Quincy Adams")
+
+f.plotsent.len(In.list=sentence.list, InFile="GeorgeWBush", 
+               InType="inaug",InTerm=1,President = "George Bush")
+
+f.plotsent.len(In.list=sentence.list, InFile="RutherfordBHayes", 
+               InType="inaug",InTerm=1,President = "Rutherford B. Hayes")
+
+f.plotsent.len(In.list=sentence.list, InFile="FranklinDRoosevelt", 
+               InType="inaug",InTerm=1,President = "Franklin D. Roosevelt")
+
+f.plotsent.len(In.list=sentence.list, InFile="JamesMonroe", 
+               InType="inaug",InTerm=1,President = "James Monroe")
+
+
+f.plotsent.len(In.list=sentence.list, InFile="GeorgeWashington", 
+               InType="inaug",InTerm=1,President = "George Washington")
+
+```
+The figures listed above show some example of pattern from two types of president.
+
+# Step 2: Emotion analysis
+
+```{r, fig.width=5, fig.height=5}
+heatmap.2(cor(sentence.list%>%filter(type=="inaug")%>%select(anger:trust)), 
+          scale = "none", 
+          col = bluered(100), , margin=c(6, 6), key=F,
+          trace = "none", density.info = "none")
+
+heatmap.2(cor(sentence.list%>%filter(File%in%Hpertpresident)%>%select(anger:trust)), 
+          scale = "none", 
+          col = bluered(100), , margin=c(6, 6), key=F,
+          trace = "none", density.info = "none")
+
+heatmap.2(cor(sentence.list%>%filter(File%in%Lpertpresident)%>%select(anger:trust)), 
+          scale = "none", 
+          col = bluered(100), , margin=c(6, 6), key=F,
+          trace = "none", density.info = "none")
+
+```
+
+The heatmap show difference in the mixed feeling of the speech.
+Presidents with high approval rate mixed anger with disgust, and joy with trust.
+Presidents with low approval rate, yet, mixed anger with fear, joy with anticipation.
+Probably, presidents with high approval rate is happy because people voted him. They are angry about the disgusting hardship they faced.
+And presidents with low approval rate were happy because they won from a tough fight and wanted to make a difference, they were angry and fear about people who did not support them.
+```{r}
+emo.means=colMeans(select(sentence.list, anger:trust)>0.01)
+col.use=c("red2", "darkgoldenrod1", 
+            "chartreuse3", "blueviolet",
+            "darkgoldenrod2", "dodgerblue3", 
+            "darkgoldenrod1", "darkgoldenrod1")
+barplot(emo.means[order(emo.means)], las=2, col=col.use[order(emo.means)], horiz=T, main="Inaugural Speeches")
+
+emo.means1=colMeans(sentence.list%>%filter(File%in%Hpertpresident)%>%select(anger:trust)>0.01)
+
+emo.means2=colMeans(sentence.list%>%filter(File%in%Lpertpresident)%>%select(anger:trust)>0.01)
+col.use=c("red2", "darkgoldenrod1", 
+            "chartreuse3", "blueviolet",
+            "darkgoldenrod2", "dodgerblue3", 
+            "darkgoldenrod1", "darkgoldenrod1")
+barplot(c(emo.means1[order(emo.means1)],emo.means2[order(emo.means2)]), las=2,angle=rep(c(90,45),each = 8),density=rep(c(20),16), col=col.use[order(emo.means)], horiz=T,beside = T,main="President Inaugural Speeches with high and low percentage")
+legend("bottomright", c("High","Low"), angle = c(90,45),density = 20)
+
+```
+We use bar plot to compare the feeling in the speech between two type of presidents.
+President with lower percentage, the sadness in speech is less than surprise feeling, which is different from the predsident with high percentage as well as the average.
+We should also notice that president with high percentage has less joy and trust in their speech compared with the president with low percentage.
+
+
+
+# Step 3: sentiment analysis --- Topic modeling
+
+
+Topic modelling on president speech with low approval rate
+```{r}
+
+S1 <-sentence.list%>%filter(File%in%Lpertpresident)
+  
+corpus.list=S1[2:(nrow(S1)-1), ]
+sentence.pre=S1$sentences[1:(nrow(S1)-2)]
+sentence.post=S1$sentences[3:(nrow(S1)-1)]
+corpus.list$snipets=paste(sentence.pre, corpus.list$sentences, sentence.post, sep=" ")
+rm.rows=(1:nrow(corpus.list))[corpus.list$sent.id==1]
+rm.rows=c(rm.rows, rm.rows-1)
+corpus.list=corpus.list[-rm.rows, ]
+  
+  
+docs <- Corpus(VectorSource(corpus.list$snipets))
+docs <-tm_map(docs,content_transformer(tolower))
+docs <- tm_map(docs, removePunctuation)
+docs <- tm_map(docs, removeNumbers)
+docs <- tm_map(docs, removeWords, stopwords("english"))
+docs <- tm_map(docs, stripWhitespace)
+docs <- tm_map(docs,stemDocument)
+
+  
+dtm <- DocumentTermMatrix(docs)
+#convert rownames to filenames#convert rownames to filenames
+rownames(dtm) <- paste(corpus.list$type, corpus.list$File,
+                         corpus.list$Term, corpus.list$sent.id, sep="_")
+  
+rowTotals <- apply(dtm , 1, sum) #Find the sum of words in each Document
+  
+dtm  <- dtm[rowTotals> 0, ]
+corpus.list=corpus.list[rowTotals>0, ]
+  
+  
+L_corpus.list <- corpus.list
+
+#Set parameters for Gibbs sampling
+burnin <- 1000
+iter <- 1000
+thin <- 500
+seed <-list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+
+#Number of topics
+k <- 15
+
+#Run LDA using Gibbs sampling
+L_ldaOut <-LDA(dtm, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+#write out results
+#docs to topics
+L_ldaOut.topics <- as.matrix(topics(L_ldaOut))
+table(c(1:k, L_ldaOut.topics))
+write.csv(L_ldaOut.topics,file=paste("../output/LDAGibbs",k,"L_DocsToTopics.csv"))
+
+#top 6 terms in each topic
+L_ldaOut.terms <- as.matrix(terms(L_ldaOut,20))
+write.csv(L_ldaOut.terms,file=paste("../output/LDAGibbs",k,"L_TopicsToTerms.csv"))
+
+#probabilities associated with each topic assignment
+L_topicProbabilities <- as.data.frame(L_ldaOut@gamma)
+write.csv(L_topicProbabilities,file=paste("../output/LDAGibbs",k,"L_TopicProbabilities.csv"))
+
+L_terms.beta=L_ldaOut@beta
+L_terms.beta=scale(L_terms.beta)
+L_topics.terms=NULL
+for(i in 1:k){
+  L_topics.terms=rbind(L_topics.terms, L_ldaOut@terms[order(L_terms.beta[i,], decreasing = TRUE)[1:7]])
+}
+
+L_topics.terms
+L_ldaOut.terms
+
+
+```
+```{r}
+L_topics.hash = c("history","state","economics","duty","peace","freedom","life","justice","patriot","govern","party","legislation","american","future","help")
+
+L_corpus.list$ldatopic=as.vector(L_ldaOut.topics)
+L_corpus.list$ldahash=L_topics.hash[L_ldaOut.topics]
+
+colnames(L_topicProbabilities)=L_topics.hash
+L_corpus.list.df=cbind(L_corpus.list, L_topicProbabilities)
+
+
+L_topic.plot=c(1, 2, 3, 5, 12, 13)
+#history  #state  #economics  #peace  #legislation  #american
+print(L_topics.hash[L_topic.plot])
+
+par(mfrow=c(5, 1), mar=c(1,1,2,0), bty="n", xaxt="n", yaxt="n")
+
+speech.df=tbl_df(L_corpus.list.df)%>%filter(File=="JimmyCarter", type=="inaug", Term==1)%>%select(sent.id, history:help)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="Jimmy Carter, inaugural Speeches")
+
+
+speech.df=tbl_df(L_corpus.list.df)%>%filter(File=="WoodrowWilson", type=="inaug", Term==1)%>%select(sent.id, history:help)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="Woodrow Wilson, inaugural Speeches")
+
+speech.df=tbl_df(L_corpus.list.df)%>%filter(File=="GeorgeWBush", type=="inaug", Term==1)%>%select(sent.id, history:help)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="George Bush, inaugural Speeches")
+
+
+speech.df=tbl_df(L_corpus.list.df)%>%filter(File=="JohnQuincyAdams", type=="inaug", Term==1)%>%select(sent.id, history:help)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="John Quincy Adams, inaugural Speeches")
+
+```
+Topic modelling on president speech with high approval rate
+```{r}
+S2 <-sentence.list%>%filter(File%in%Hpertpresident)
+  
+corpus.list=S2[2:(nrow(S2)-1), ]
+sentence.pre=S2$sentences[1:(nrow(S2)-2)]
+sentence.post=S2$sentences[3:(nrow(S2)-1)]
+corpus.list$snipets=paste(sentence.pre, corpus.list$sentences, sentence.post, sep=" ")
+rm.rows=(1:nrow(corpus.list))[corpus.list$sent.id==1]
+rm.rows=c(rm.rows, rm.rows-1)
+corpus.list=corpus.list[-rm.rows, ]
+
+
+docs <- Corpus(VectorSource(corpus.list$snipets))
+docs <-tm_map(docs,content_transformer(tolower))
+docs <- tm_map(docs, removePunctuation)
+docs <- tm_map(docs, removeNumbers)
+docs <- tm_map(docs, removeWords, stopwords("english"))
+docs <- tm_map(docs, stripWhitespace)
+docs <- tm_map(docs,stemDocument)
+
+  
+dtm <- DocumentTermMatrix(docs)
+#convert rownames to filenames#convert rownames to filenames
+rownames(dtm) <- paste(corpus.list$type, corpus.list$File,
+                         corpus.list$Term, corpus.list$sent.id, sep="_")
+  
+rowTotals <- apply(dtm , 1, sum) #Find the sum of words in each Document
+  
+dtm  <- dtm[rowTotals> 0, ]
+corpus.list=corpus.list[rowTotals>0, ]
+
+H_corpus.list <- corpus.list 
+  
+#Set parameters for Gibbs sampling
+burnin <- 1000
+iter <- 1000
+thin <- 500
+seed <-list(2003,5,63,100001,765)
+nstart <- 5
+best <- TRUE
+
+#Number of topics
+k <- 15
+
+#Run LDA using Gibbs sampling
+H_ldaOut <-LDA(dtm, k, method="Gibbs", control=list(nstart=nstart, 
+                                                 seed = seed, best=best,
+                                                 burnin = burnin, iter = iter, 
+                                                 thin=thin))
+#write out results
+#docs to topics
+H_ldaOut.topics <- as.matrix(topics(H_ldaOut))
+table(c(1:k, H_ldaOut.topics))
+write.csv(H_ldaOut.topics,file=paste("../output/LDAGibbs",k,"H_DocsToTopics.csv"))
+
+#top 6 terms in each topic
+H_ldaOut.terms <- as.matrix(terms(H_ldaOut,20))
+write.csv(H_ldaOut.terms,file=paste("../output/LDAGibbs",k,"H_TopicsToTerms.csv"))
+
+#probabilities associated with each topic assignment
+H_topicProbabilities <- as.data.frame(H_ldaOut@gamma)
+write.csv(H_topicProbabilities,file=paste("../output/LDAGibbs",k,"H_TopicProbabilities.csv"))
+
+H_terms.beta=H_ldaOut@beta
+H_terms.beta=scale(H_terms.beta)
+H_topics.terms=NULL
+for(i in 1:k){
+  H_topics.terms=rbind(H_topics.terms, H_ldaOut@terms[order(H_terms.beta[i,], decreasing = TRUE)[1:7]])
+}
+
+H_topics.terms
+H_ldaOut.terms
+
+```
+
+
+
+
+```{r}
+H_topics.hash=c("economics","peace","democracy","govern","believe","diplomacy","people","state","american","duty","legislation","war","public","faith","history")
+
+H_corpus.list$ldatopic=as.vector(H_ldaOut.topics)
+H_corpus.list$ldahash=H_topics.hash[H_ldaOut.topics]
+
+colnames(H_topicProbabilities)=H_topics.hash
+H_corpus.list.df=cbind(H_corpus.list, H_topicProbabilities)
+
+
+H_topic.plot=c(15, 8, 1, 2, 11, 9)
+#history  #state  #economics  #peace  #legislation  #american
+print(H_topics.hash[H_topic.plot])
+
+
+par(mfrow=c(5, 1), mar=c(1,1,2,0), bty="n", xaxt="n", yaxt="n")
+
+speech.df=tbl_df(H_corpus.list.df)%>%filter(File=="RichardNixon", type=="inaug", Term==2)%>%select(sent.id, economics:history)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="Richard Nixon, inaugural Speeches")
+
+
+speech.df=tbl_df(H_corpus.list.df)%>%filter(File=="ThomasJefferson", type=="inaug", Term==2)%>%select(sent.id, economics:history)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="Thomas Jefferson, inaugural Speeches")
+
+speech.df=tbl_df(H_corpus.list.df)%>%filter(File=="RonaldReagan", type=="inaug", Term==1)%>%select(sent.id, economics:history)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="Ronald Reagan, inaugural Speeches")
+
+speech.df=tbl_df(H_corpus.list.df)%>%filter(File=="JamesMonroe", type=="inaug", Term==1)%>%select(sent.id, economics:history)
+speech.df=as.matrix(speech.df)
+speech.df[,-1]=replace(speech.df[,-1], speech.df[,-1]<1/15, 0.001)
+speech.df[,-1]=f.smooth.topic(x=speech.df[,1], y=speech.df[,-1])
+plot.stacked(speech.df[,1], speech.df[,L_topic.plot+1],
+             xlab="Sentences", ylab="Topic share", main="James Monroe, inaugural Speeches")
+
+```
+
+From the topic figure, we cannot find that there is relationship between the choice of topic and the approval rate. We can conclude that, the topics of the issue are related to the situation of United States at that period. And the approval rate did not affect the topics. 
+
+# Step 4:Summary
+Accoring to the analysis, we found that president with high approval rate tended to speak more short sentense than those with low approval rate. And after the election, president with high approval rate will have a different emotion in the speech compared with those with low approval rate. As for topics of the speech, there wasn't a pattern for those with high approval rate nor low approval rate. The topics could be decided according to the social problem at that period and has nothing to do with approval rate.
